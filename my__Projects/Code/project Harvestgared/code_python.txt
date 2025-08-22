@@ -1,0 +1,123 @@
+import cv2
+import cvzone
+from ultralytics import YOLO
+import math
+import serial
+import time
+import smtplib
+from email.mime.text import MIMEText
+
+# إعدادات البريد الإلكتروني
+SMTP_SERVER = "smtp.gmail.com"
+SMTP_PORT = 587
+SENDER_EMAIL = "youseftarekj2@gmail.com"
+SENDER_PASSWORD = "rooi ffzg voty qddp"
+RECIPIENT_EMAIL = "mabdelnaser1616@gmail.com"
+
+
+def send_email(subject, body):
+    msg = MIMEText(body)
+    msg["Subject"] = subject
+    msg["From"] = SENDER_EMAIL
+    msg["To"] = RECIPIENT_EMAIL
+    try:
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()
+        server.login(SENDER_EMAIL, SENDER_PASSWORD)
+        server.sendmail(SENDER_EMAIL, RECIPIENT_EMAIL, msg.as_string())
+        server.quit()
+        print("✅ تم إرسال البريد الإلكتروني بنجاح!")
+    except Exception as e:
+        print("❌ حدث خطأ أثناء إرسال البريد:", e)
+
+
+# تحميل نموذج YOLO
+model_path = r"C:\Users\User\Downloads\best.pt"
+model = YOLO(model_path)
+
+# تعريف أسماء الفئات
+classnames = ['carrots', 'potato', 'tomato']
+
+# تهيئة الكاميرا
+cap = cv2.VideoCapture(1)
+if not cap.isOpened():
+    print("Error: Could not open camera.")
+    exit()
+
+# تهيئة الاتصال التسلسلي مع Arduino
+ser = serial.Serial("COM4", 9600)
+time.sleep(0.5)
+
+# تتبع المحصول المؤكد
+confirmed_class = None
+confirmation_time = None
+sent_initial_alert = False
+sent_final_alert = False
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        print("Error: Failed to capture frame.")
+        break
+
+    # معالجة الإطار باستخدام YOLO
+    result = model(frame, stream=True)
+    detected_class = None
+
+    for info in result:
+        boxes = info.boxes
+        for box in boxes:
+            confidence = box.conf[0]
+            confidence = math.ceil(confidence * 100)
+            Class = int(box.cls[0])
+
+            if confidence > 30:  # تغيير العتبة إلى 30٪
+                detected_class = classnames[Class]
+                x1, y1, x2, y2 = box.xyxy[0]
+                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+
+                # رسم المربع حول المحصول
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                label = f'{detected_class} {confidence}%'
+                cvzone.putTextRect(frame, label, (x1, y1 - 10), scale=1, thickness=2, colorR=(0, 0, 255),
+                                   colorT=(255, 255, 255), border=2)
+
+    # التحقق مما إذا كان المحصول لم يتغير لمدة 5 ثوانٍ
+    if detected_class == confirmed_class:
+        if confirmation_time and time.time() - confirmation_time >= 5 and not sent_initial_alert:
+            send_email("تم اكتشاف محصول", f"عزيزي العميل، انت الان مخزن محصول {confirmed_class}")
+            if confirmed_class == 'potato':
+                ser.write('1'.encode())
+            elif confirmed_class == 'tomato':
+                ser.write('2'.encode())
+            elif confirmed_class == 'carrots':
+                ser.write('3'.encode())
+            sent_initial_alert = True
+    else:
+        confirmed_class = detected_class
+        confirmation_time = time.time()
+        sent_initial_alert = False
+
+    # إذا لم يتم اكتشاف أي محصول، إرسال 4 إلى Arduino
+    if not confirmed_class:
+        ser.write('4'.encode())
+        cvzone.putTextRect(frame, "not detection", (50, 50), scale=1, thickness=2, colorR=(0, 0, 255),
+                           colorT=(255, 255, 255), border=2)
+
+    # بعد مرور 15 ثانية، إرسال التنبيه النهائي
+    if sent_initial_alert and not sent_final_alert and time.time() - confirmation_time >= 15:
+        send_email("تنبيه",
+                   "عزيزي العميل احب ابلغ حضرتك ان المخزون الي حضرتك مخزنه سوف ينتهي مده التخزين بعد 15 يوم من الان يرجي من حضرتك ان تاتي في الوقت المحدد، سوف ابعت لك اميل قبلها بيومين ابلغ حضرتك ثاني!")
+        sent_final_alert = True
+
+    # عرض الإطار
+    cv2.imshow('Detected Objects', frame)
+
+    # كسر الحلقة إذا تم الضغط على 'q'
+    if cv2.waitKey(1) == ord('q'):
+        break
+
+# إغلاق جميع العمليات
+cap.release()
+cv2.destroyAllWindows()
+ser.close()
